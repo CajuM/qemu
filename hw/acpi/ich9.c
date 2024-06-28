@@ -49,6 +49,33 @@ do { printf("%s "fmt, __func__, ## __VA_ARGS__); } while (0)
 #define ICH9_DEBUG(fmt, ...)    do { } while (0)
 #endif
 
+void ich9_pm_update_periodic_timer(ICH9LPCPMRegs *pm, bool enable)
+{
+    uint16_t per_smi_sel;
+    int64_t expire_time;
+    ICH9LPCState *lpc;
+
+    if (enable) {
+        lpc = container_of(pm, ICH9LPCState, pm);
+        per_smi_sel = pci_get_word(lpc->d.config + ICH9_LPC_GEN_PMCON_1) & 3;
+        expire_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 8 * (1 << (3 - per_smi_sel)) * NANOSECONDS_PER_SECOND;
+
+        timer_mod(pm->periodic_timer, expire_time);
+    } else {
+        timer_del(pm->periodic_timer);
+    }
+}
+
+static void ich9_periodic_timer(void *opaque)
+{
+    ICH9LPCPMRegs *pm = opaque;
+
+    pm->smi_sts = ICH9_PMIO_SMI_STS_PERIODIC_STS;
+    ich9_generate_smi();
+
+    ich9_pm_update_periodic_timer(pm, pm->smi_en & ICH9_PMIO_SMI_EN_PERIODIC_EN);
+}
+
 static void ich9_pm_update_sci_fn(ACPIREGS *regs)
 {
     ICH9LPCPMRegs *pm = container_of(regs, ICH9LPCPMRegs, acpi_regs);
@@ -108,6 +135,7 @@ static void ich9_smi_writel(void *opaque, hwaddr addr, uint64_t val,
         }
         pm->smi_en &= ~pm->smi_en_wmask;
         pm->smi_en |= (val & pm->smi_en_wmask);
+        ich9_pm_update_periodic_timer(pm, pm->smi_en & ICH9_PMIO_SMI_EN_PERIODIC_EN);
         break;
     }
 }
@@ -340,6 +368,8 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm, qemu_irq sci_irq)
                                  &pm->acpi_memory_hotplug,
                                  ACPI_MEMORY_HOTPLUG_BASE);
     }
+
+    pm->periodic_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ich9_periodic_timer, pm);
 }
 
 static void ich9_pm_get_gpe0_blk(Object *obj, Visitor *v, const char *name,
